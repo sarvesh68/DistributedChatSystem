@@ -3,7 +3,9 @@ import threading
 import uuid
 import time
 
+#python figure out which network im connected to : port extract 
 BROADCAST_PORT = 9999  # Dedicated port for UDP broadcasts
+BROADCAST_IP = '127.0.0.1'
 
 class Peer():
     def __init__(self, peer_id, address, port):
