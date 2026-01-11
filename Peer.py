@@ -26,6 +26,8 @@ class Peer():
         self.heartbeat_thread = None
         self.leader_check_thread = None
         self.pending_acks = {}
+        self.sequence_number = 0
+        self.vector_clock = {}
 
     def __str__(self):
         return f"Peer ID: {self.peer_id}, Address: {self.address}, Port: {self.port}"
@@ -221,9 +223,43 @@ class Peer():
                         self.send_successor_information(new_peer_id) 
                         #HOW TO FIGURE OUT WHICH PEERS TO SEND NEW SUCCESSOR INFO TO?
 
+                        #ALSO SEND UPDATED ORDERED LIST TO ALL OTHER PEERS VIA MULTICAST
+                        #MULTICAST ORDERED PEER LIST UPDATE FUNCTION NEEDED
+                        self.multicast_ordered_peer_list_update()
                     else:
                         print(f"Peer ID {new_peer_id} already in group view.")
             
+    def multicast_ordered_peer_list_update(self):
+        if self.isGroupLeader:
+            message = f"VIEW_CHANGE:{self.orderedPeerList}"
+            print(f"Multicasting updated successor information to all peers.")
+            for peer_id, peer_info in self.groupView.items():
+                if peer_id != self.peer_id:
+                    try:
+                        self.send_connection_request(peer_info['address'], peer_info['port'], peer_id)
+                        self.send_message(peer_id, message)
+                        print(f"Sent updated successor information to {peer_id}: {message}")
+                    except Exception as e:
+                        print(f"Failed to send updated successor information to {peer_id}: {e}")
+
+    def handle_view_change(self, new_ordered_list):
+        print(f"Received view change: {new_ordered_list}")
+        self.orderedPeerList = new_ordered_list
+        print(f"Updated ordered peer list after VIEW_CHANGE: {self.orderedPeerList}")
+
+        # selfIndex = self.orderedPeerList.index(self.peer_id)
+        # successorIndex = (selfIndex + 1) % len(self.orderedPeerList)
+        # successor_id = self.orderedPeerList[successorIndex]
+        # successor_info = self.groupView.get(successor_id)
+        # if successor_info:
+        #     self.successor = {
+        #         'peer_id': successor_id,
+        #         'address': successor_info['address'],
+        #         'port': successor_info['port']
+        #     }
+        # else:
+        #     self.successor = successor_id  # Fallback
+        # print(f"My successor is now: {self.successor}")
 
     def send_successor_information(self, peer_id_to_send_info):
         if self.isGroupLeader:
@@ -260,7 +296,7 @@ class Peer():
         print(f"Received successor information: {successor_list}")
         # Update internal state with successor information
         self.orderedPeerList = successor_list
-        print(f"Updated ordered peer list: {self.orderedPeerList}")
+        print(f"Updated ordered peer list received via VIEW_CHANGE: {self.orderedPeerList}")
 
         selfIndex = self.orderedPeerList.index(self.peer_id)
         successorIndex = (selfIndex + 1) % len(self.orderedPeerList)
