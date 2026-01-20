@@ -17,12 +17,13 @@ class Peer():
         self.isGroupLeader = False
         self.tcp_thread = None
         self.udp_thread = None
+        self.view_id = 0
         self.groupView = {}
         self.orderedPeerList = []
         self.successor = None  # Changed to dict: {'peer_id':, 'address':, 'port':}
         self.election_active = False
         self.leader_id = None
-        self.last_leader_heartbeat = time.time()
+        self.last_leader_heartbeat = None
         self.heartbeat_interval = 5  # seconds
         self.heartbeat_timeout = 10  # seconds
         self.heartbeat_thread = None
@@ -30,6 +31,8 @@ class Peer():
         self.pending_acks = {}
         self.sequence_number = 0
         self.vector_clock = {}
+        self.election_timeout = 5  # seconds
+        self.election_start_time = None
 
     def __str__(self):
         return f"Peer ID: {self.peer_id}, Address: {self.address}, Port: {self.port}"
@@ -61,13 +64,22 @@ class Peer():
             print("Waiting to join the network...")
             self.broadcast_new_peer_request('127.0.0.1', 9999)
             time.sleep(5)
-        
+
         self.start_lcr_election()
 
-        # Start fault tolerance threads
-        self.start_leader_check_thread()
-        if self.isGroupLeader:
-            self.start_heartbeat_thread()
+        #after starting election : when does electionactive become false?
+        #election_active is set to False when the election completes or fails
+        
+
+        time.sleep(5)  # Give some time for election to settle
+        if self.election_active==False:
+            self.print_status()
+        # # Start fault tolerance threads
+        # if self.isGroupLeader:
+        #     self.start_heartbeat_thread()
+
+        # self.start_leader_check_thread()
+
 
         # Keep the peer running by joining the threads
         if self.tcp_thread:
@@ -152,6 +164,20 @@ class Peer():
                     elif message == "HEARTBEAT_ACK":
                         # Leader received ack, no action needed
                         pass
+                    elif message.startswith("VIEW_CHANGE:"):
+                        print(f"Hurrah Received VIEW_CHANGE message: {message} my peer id is {self.peer_id}")
+                        parts = message.split("VIEW_CHANGE:")[1].split("-", 2)
+                        new_ordered_list_str = parts[0]
+                        new_group_view_str = parts[1]
+                        new_view_id_str = parts[2]
+                        new_ordered_list = eval(new_ordered_list_str)
+                        new_group_view = eval(new_group_view_str)
+                        new_view_id = int(new_view_id_str)
+                        print(f"Parsed VIEW_CHANGE - Ordered List: {new_ordered_list}, Group View: {new_group_view}, View ID: {new_view_id}")
+                        # if self.isGroupLeader:
+                        #     print("Ignoring VIEW_CHANGE as I am the Group Leader.")
+                        #     continue
+                        self.handle_view_change(new_ordered_list, new_group_view, new_view_id)
                 except Exception as e:
                     print(f"Error receiving from {peer_key}: {e}")
                     break
@@ -202,6 +228,10 @@ class Peer():
             # For example, add the new peer to the group view
 
             if self.isGroupLeader:
+                # if leader election on going, ignore new peer requests
+                if self.election_active:
+                    print("Election active, ignoring new peer requests.")
+                    continue
                 if decoded_msg.split(':')[0] == "NEW_PEER_REQUEST":
                     if new_peer_id not in self.groupView:
                         self.groupView[new_peer_id] = {
@@ -219,7 +249,7 @@ class Peer():
                         #broadcast_successor_information()
                         
                         
-                        if(len(self.orderedPeerList) == 2):
+                        if(len(self.orderedPeerList) >= 2):
                             self.handle_successor_information(self.orderedPeerList, self.groupView)
 
                         self.send_successor_information(new_peer_id) 
@@ -227,28 +257,35 @@ class Peer():
 
                         #ALSO SEND UPDATED ORDERED LIST TO ALL OTHER PEERS VIA MULTICAST
                         #MULTICAST ORDERED PEER LIST UPDATE FUNCTION NEEDED
-                        self.multicast_ordered_peer_list_update()
+                        #update view id
+                        self.view_id += 1
+                        self.multicast_groupviewandorderedlist_update()
                     else:
                         print(f"Peer ID {new_peer_id} already in group view.")
             
-    def multicast_ordered_peer_list_update(self):
+    def multicast_groupviewandorderedlist_update(self):
         if self.isGroupLeader:
-            message = f"VIEW_CHANGE:{self.orderedPeerList}"
+            message = f"VIEW_CHANGE:{self.orderedPeerList}-{self.groupView}-{self.view_id}"
             print(f"Multicasting updated successor information to all peers.")
             for peer_id, peer_info in self.groupView.items():
                 if peer_id != self.peer_id:
                     try:
-                        self.send_connection_request(peer_info['address'], peer_info['port'], peer_id)
+                        if peer_id not in self.connection_dict:
+                            self.send_connection_request(peer_info['address'], peer_info['port'], peer_id)
                         self.send_message(peer_id, message)
-                        print(f"Sent updated successor information to {peer_id}: {message}")
+                        print(f"Sent updated successor information/group view change to {peer_id}: {message}")
                     except Exception as e:
                         print(f"Failed to send updated successor information to {peer_id}: {e}")
 
-    def handle_view_change(self, new_ordered_list):
-        print(f"Received view change: {new_ordered_list}")
-        self.orderedPeerList = new_ordered_list
-        print(f"Updated ordered peer list after VIEW_CHANGE: {self.orderedPeerList}")
-
+    def handle_view_change(self, new_ordered_list, new_group_view, new_view_id):
+        #if self.view_id < new_view_id:
+        print("Entering handle_view_change")
+        if self.view_id < new_view_id:
+            print(f"Received view change: {new_ordered_list}, {new_group_view}")
+            self.orderedPeerList = new_ordered_list
+            self.groupView = new_group_view
+            print(f"Updated ordered peer list after VIEW_CHANGE: {self.orderedPeerList} and group view: {self.groupView}")
+            self.view_id = new_view_id
         # selfIndex = self.orderedPeerList.index(self.peer_id)
         # successorIndex = (selfIndex + 1) % len(self.orderedPeerList)
         # successor_id = self.orderedPeerList[successorIndex]
@@ -310,6 +347,12 @@ class Peer():
                 'address': successor_info['address'],
                 'port': successor_info['port']
             }
+            #after receiving successor info : check if there is a connection to successor which is needed for election messages
+            if successor_id not in self.connection_dict:
+                try:
+                    self.send_connection_request(successor_info['address'], successor_info['port'], successor_id)
+                except Exception as e:
+                    print(f"Failed to connect to successor {successor_id}: {e}")
         else:
             self.successor = successor_id  # Fallback
         print(f"My successor is now: {self.successor}")
@@ -335,11 +378,15 @@ class Peer():
 
     def start_lcr_election(self):
         if not self.election_active and self.successor:
+            successor_id = self.successor['peer_id'] if isinstance(self.successor, dict) else self.successor
+            if successor_id not in self.connection_dict:
+                print(f"No connection to successor {successor_id}, cannot start election")
+                return
             print(f"{self.peer_id} Now starting LCR Election")
             self.election_active = True
+            self.election_start_time = time.time()
             self.isGroupLeader = False
             message = f"LCR_ELECTION:{self.peer_id}"
-            successor_id = self.successor['peer_id'] if isinstance(self.successor, dict) else self.successor
             self.send_message(successor_id, message)
 
     def handle_lcr_election(self, message):
@@ -351,7 +398,10 @@ class Peer():
             print(f"Relinquishing leadership to higher ID: {received_id}")
             # forward to successor
             successor_id = self.successor['peer_id'] if isinstance(self.successor, dict) else self.successor
-            self.send_message(successor_id, message)
+            if successor_id in self.connection_dict:
+                self.send_message(successor_id, message)
+            else:
+                print(f"No connection to successor {successor_id}, cannot forward election message")
         elif received_id < self.peer_id:
             # discard
             pass
@@ -360,24 +410,32 @@ class Peer():
             self.isGroupLeader = True
             self.leader_id = self.peer_id
             self.election_active = False
+            self.election_start_time = None
             print(f"I am the leader: {self.peer_id}")
             # announce leader
             leader_message = f"LCR_LEADER:{self.peer_id}"
             successor_id = self.successor['peer_id'] if isinstance(self.successor, dict) else self.successor
-            self.send_message(successor_id, leader_message)
+            if successor_id in self.connection_dict:
+                self.send_message(successor_id, leader_message)
+            else:
+                print(f"No connection to successor {successor_id}, cannot announce leader")
 
     def handle_lcr_leader(self, message):
         leader_id = message.split(":")[1]
         self.leader_id = leader_id   #update known leader
-
+        self.election_active = False
         #forward the leader announcement to other successors
         if leader_id != self.peer_id:
             # forward to successor
             successor_id = self.successor['peer_id'] if isinstance(self.successor, dict) else self.successor
-            self.send_message(successor_id, message)
+            if successor_id in self.connection_dict:
+                self.send_message(successor_id, message)
+            else:
+                print(f"No connection to successor {successor_id}, cannot forward leader message")
         else:
             # election complete
             self.election_active = False
+            self.election_start_time = None
             print("Election complete.")
 
     def start_heartbeat_thread(self):
@@ -414,7 +472,28 @@ class Peer():
     def check_leader_heartbeat(self):
         while True:
             time.sleep(1)
+            # Check election timeout first, regardless of heartbeat status
+            if self.election_active and self.election_start_time and time.time() - self.election_start_time > self.election_timeout:
+                print("Election timeout, resetting election state")
+                self.election_active = False
+                self.election_start_time = None
+                # Do not automatically restart election to prevent indefinite loops
+                # Let heartbeat timeout handle leader failures separately
+            if self.last_leader_heartbeat is None:
+                print("No heartbeat received yet and leader not established yet")
+                continue  # Continue checking instead of returning, to allow election timeout checks
             if not self.isGroupLeader and time.time() - self.last_leader_heartbeat > self.heartbeat_timeout:
                 print("Leader heartbeat timeout, starting election")
                 self.start_lcr_election()
                 break  # Prevent multiple elections
+
+    def print_status(self):
+        print(f"Peer ID: {self.peer_id}")
+        print(f"Address: {self.address}")
+        print(f"Port: {self.port}")
+        print(f"Is Group Leader: {self.isGroupLeader}")
+        print(f"Part of Network: {self.partOfNetwork}")
+        print(f"Leader ID: {self.leader_id}")
+        print(f"Group View: {self.groupView}")
+        print(f"Ordered Peer List: {self.orderedPeerList}")
+        print(f"Successor: {self.successor}")
